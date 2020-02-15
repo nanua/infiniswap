@@ -44,6 +44,10 @@
  */
 
 #include "infiniswap.h"
+#ifdef COMP_ENABLE
+#include "comp_pool.h"
+#include "comp_driver.h"
+#endif
 
 /* lookup_bdev patch: https://www.redhat.com/archives/dm-devel/2016-April/msg00372.html */
 #ifdef HAVE_LOOKUP_BDEV_PATCH
@@ -59,7 +63,11 @@ void IS_stackbd_end_io(struct bio *bio, int err)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
 	blk_mq_end_request(req, err);
 #else
+#ifdef COMP_ENABLE
+	req->bio->bi_end_io(req->bio, err);
+#else
 	blk_mq_end_io(req, err);
+#endif
 #endif	
 
 }
@@ -70,7 +78,11 @@ void IS_stackbd_end_io2(struct bio *bio, int err)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
 	blk_mq_end_request(req, err);
 #else
+#ifdef COMP_ENABLE
+	req->bio->bi_end_io(req->bio, err);
+#else
 	blk_mq_end_io(req, err);
+#endif
 #endif	
 
 }
@@ -89,13 +101,15 @@ static void stackbd_io_fn(struct bio *bio)
         printk("bio is NULL\n");
 
 	bio->bi_bdev = stackbd.bdev_raw;
+#ifndef COMP_ENABLE
 	trace_block_bio_remap(bdev_get_queue(stackbd.bdev_raw), bio, bio->bi_bdev->bd_dev, 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
 	bio->bi_iter.bi_sector);
 #else
 	bio->bi_sector);
-#endif 
-	
+#endif
+#endif
+
 	generic_make_request(bio);
 }
 static int stackbd_threadfn(void *data)
@@ -218,6 +232,10 @@ void stackbd_make_request2(struct request_queue *q, struct request *req)
     struct bio *b = req->bio;
     int i;
     int len = req->nr_phys_segments;
+#ifdef COMP_ENABLE
+	struct IS_comp_bio_private *bio_private;
+	unsigned long rqst_page_index;
+#endif
 
     spin_lock_irq(&stackbd.lock);
     if (!stackbd.bdev_raw)
@@ -235,7 +253,14 @@ void stackbd_make_request2(struct request_queue *q, struct request *req)
     	bio_list_add(&stackbd.bio_list, bio);
     	b = b->bi_next;
 	}
-    bio = bio_clone(b, GFP_ATOMIC);
+	bio = bio_clone(b, GFP_ATOMIC);
+#ifdef COMP_ENABLE
+	bio_private = b->bi_private;
+	rqst_page_index = bio_private->rqst_page_index;
+	bio->bi_sector = rqst_page_index << (PAGE_SHIFT - IS_SECT_SHIFT);
+	bio->bi_size = IS_PAGE_SIZE;
+	bio->bi_io_vec[0].bv_len = IS_PAGE_SIZE;
+#endif
 	bio->bi_end_io = (bio_end_io_t*)IS_stackbd_end_io;
 	bio->bi_private = (void*) uint64_from_ptr(req);
     bio_list_add(&stackbd.bio_list, bio);
@@ -406,11 +431,23 @@ static struct blk_mq_hw_ctx *IS_alloc_hctx(struct blk_mq_reg *reg,
 	return hctx;
 }
 
+#ifdef COMP_ENABLE
+static void IS_free_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_index)
+{
+	struct IS_comp_hq_private *private = hctx->driver_data;
+	pr_info("%s called\n", __func__);
+	kfree(private->buffer);
+	kfree(private->cmem);
+	kfree(private->compress_workmem);
+	kfree(hctx);
+}
+#else
 static void IS_free_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_index)
 {
 	pr_info("%s called\n", __func__);
 	kfree(hctx);
 }
+#endif
 #endif
 
 void IS_mq_request_stackbd(struct request *req)
@@ -445,7 +482,10 @@ static int IS_request(struct request *req, struct IS_queue *xq)
 
 	// pr_info("%s called and req=%p, start=0x%lx, len=%lu\n", __func__, req, start, len);
 	gb_index = start >> ONE_GB_SHIFT;
-	end_index = (start + len - IS_PAGE_SIZE) >> ONE_GB_SHIFT;
+	if ((start + len) % IS_PAGE_SIZE == 0)
+		end_index = (start + len - IS_PAGE_SIZE) >> ONE_GB_SHIFT;
+	else
+		end_index = (start + len - ((start + len) % IS_PAGE_SIZE)) >> ONE_GB_SHIFT;
 
 	//count
 	if (write) {
@@ -521,7 +561,11 @@ static int IS_request(struct request *req, struct IS_queue *xq)
 		}
 	}else{	//read is always single page
 		if (atomic_read(&IS_sess->rdma_on) == DEV_RDMA_ON){
+#ifdef COMP_ENABLE
+			bitmap_i = (int)(chunk_offset / IS_SECT_SIZE);
+#else
 			bitmap_i = (int)(chunk_offset / IS_PAGE_SIZE);
+#endif
 			if (IS_bitmap_test(chunk->bitmap_g, bitmap_i)){ //remote recorded
 				err = IS_transfer_chunk(xdev, cb, cb_index, chunk_index, chunk, chunk_offset, len, write, req, xq);
 			}else {
@@ -537,6 +581,7 @@ static int IS_request(struct request *req, struct IS_queue *xq)
 	return err;
 }
 
+#ifndef COMP_ENABLE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
 static int IS_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(3, 18, 0)
@@ -565,7 +610,62 @@ static int IS_queue_rq(struct blk_mq_hw_ctx *hctx, struct request *rq)
 
 	return BLK_MQ_RQ_QUEUE_OK;
 }
+#endif
 
+#ifdef COMP_ENABLE
+static int IS_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
+			  unsigned int index)
+{
+	struct IS_comp_driver *driver = data;
+	struct IS_comp_hq_private *private = &driver->hw_queue_private[index];
+	int ret;
+	struct IS_file *xdev = driver->is_file;
+	struct IS_queue *xq;
+
+	private->index = index;
+	private->queue_depth = IS_QUEUE_DEPTH;
+	private->driver = driver;
+	private->buffer = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!private->buffer) {
+		pr_err("%s, unable to allocate buffer\n", __func__);
+		ret = -ENOMEM;
+		goto out;
+	}
+	private->cmem = kmalloc(PAGE_SIZE << 1, GFP_KERNEL);
+	if (!private->cmem) {
+		pr_err("%s, unable to allocate cmem\n", __func__);
+		ret = -ENOMEM;
+		goto free_buffer;
+	}
+#ifdef COMP_LZ4
+	private->compress_workmem = kmalloc(LZ4_MEM_COMPRESS, GFP_KERNEL);
+#else
+	private->compress_workmem = kmalloc(LZO1X_MEM_COMPRESS, GFP_KERNEL);
+#endif
+	if (!private->compress_workmem) {
+		pr_err("%s, unable to allocate compress_workmem\n", __func__);
+		ret = -ENOMEM;
+		goto free_cmem;
+	}
+
+	xq = &xdev->queues[index];
+	pr_info("%s called index=%u xq=%p\n", __func__, index, xq);
+	xq->IS_conn = xdev->IS_conns[index];
+	xq->xdev = xdev;
+	xq->queue_depth = xdev->queue_depth;
+	private->is_q = xq;
+	hctx->driver_data = private;
+	mutex_init(&private->lock);
+	return 0;
+
+free_cmem:
+	kfree(private->cmem);
+free_buffer:
+	kfree(private->buffer);
+out:
+	return ret;
+}
+#else
 // connect hctx with IS-file, IS-conn, and queue
 static int IS_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 			  unsigned int index)
@@ -583,6 +683,7 @@ static int IS_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 
 	return 0;
 }
+#endif
 
 static struct blk_mq_ops IS_mq_ops = {
 	.queue_rq       = IS_queue_rq,
@@ -602,8 +703,12 @@ static struct blk_mq_ops IS_mq_ops = {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 static struct blk_mq_reg IS_mq_reg = {
 	.ops		= &IS_mq_ops,
+#ifdef COMP_ENABLE
+	.cmd_size	= 0,
+#else
 	.cmd_size	= sizeof(struct raio_io_u),
 	.flags		= BLK_MQ_F_SHOULD_MERGE,
+#endif
 	.numa_node	= NUMA_NO_NODE,
 	.queue_depth	= IS_QUEUE_DEPTH,
 };
@@ -676,14 +781,58 @@ int IS_register_block_device(struct IS_file *IS_file)
 	sector_t size = IS_file->stbuf.st_size;
 	int page_size = PAGE_SIZE;
 	int err = 0;
+#ifdef COMP_ENABLE
+	struct IS_comp_driver *driver;
+#endif
 
 	pr_info("%s\n", __func__);
 	IS_file->major = IS_major;
 
+#ifdef COMP_ENABLE
+	driver = kzalloc(sizeof(struct IS_comp_driver), GFP_KERNEL);
+	if (!driver) {
+		pr_err("%s, fail to allocate compression driver\n", __func__);
+		goto comp_err;
+	}
+	IS_file->driver = driver;
+	driver->pool = zbud_create_pool();
+	if (!driver->pool) {
+		pr_err("%s, fail to allocate compression pool\n", __func__);
+		goto comp_free_driver;
+	}
+	driver->hw_queue_private = kzalloc(sizeof(struct IS_comp_hq_private) * submit_queues, GFP_KERNEL);
+	if (!driver->hw_queue_private) {
+		pr_err("%s, fail to allocate hardware queue private data\n", __func__);
+		goto comp_free_pool;
+	}
+	driver->req_workqueue = alloc_workqueue("infiniswap", WQ_MEM_RECLAIM | WQ_HIGHPRI, 1);
+	if (!driver->req_workqueue) {
+		pr_err("%s, fail to allocate work queue\n", __func__);
+		goto comp_free_hw_queue;
+	}
+	driver->is_file = IS_file;
+	goto comp_init_end;
+
+comp_free_hw_queue:
+	kfree(driver->hw_queue_private);
+comp_free_pool:
+	zbud_destroy_pool(driver->pool);
+comp_free_driver:
+	kfree(driver);
+comp_err:
+	goto out;
+
+comp_init_end:
+#endif
+
 	// set device params 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 16, 0)
 	IS_mq_reg.nr_hw_queues = submit_queues;
+#ifdef COMP_ENABLE
+	IS_file->queue = blk_mq_init_queue(&IS_mq_reg, driver);  // IS_mq_req was defined above
+#else
 	IS_file->queue = blk_mq_init_queue(&IS_mq_reg, IS_file);  // IS_mq_req was defined above
+#endif
 #else
 	IS_file->tag_set.ops = &IS_mq_ops;
 	IS_file->tag_set.nr_hw_queues = submit_queues;
@@ -794,6 +943,16 @@ out:
 
 void IS_unregister_block_device(struct IS_file *IS_file)
 {
+#ifdef COMP_ENABLE
+	struct IS_comp_driver *driver;
+
+	driver = IS_file->driver;
+	flush_workqueue(driver->req_workqueue);
+	destroy_workqueue(driver->req_workqueue);
+	kfree(driver->hw_queue_private);
+	zbud_destroy_pool(driver->pool);
+	kfree(driver);
+#endif
 	del_gendisk(IS_file->disk);
 	blk_cleanup_queue(IS_file->queue);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
@@ -877,6 +1036,16 @@ void IS_bitmap_set(int *bitmap, int i)
 	bitmap[i >> BITMAP_SHIFT] |= 1 << (i & BITMAP_MASK);
 }
 
+#ifdef COMP_ENABLE
+void IS_bitmap_group_set(int *bitmap, unsigned long offset, unsigned long len) {
+	int start_sec = (int) (offset / IS_SECT_SIZE);
+	int len_sec = (int) (len / IS_SECT_SIZE);
+	int i;
+	for (i = 0; i < len_sec; i++) {
+		IS_bitmap_set(bitmap, start_sec + i);
+	}
+}
+#else
 void IS_bitmap_group_set(int *bitmap, unsigned long offset, unsigned long len)
 {
 	int start_page = (int)(offset/IS_PAGE_SIZE);	
@@ -886,6 +1055,17 @@ void IS_bitmap_group_set(int *bitmap, unsigned long offset, unsigned long len)
 		IS_bitmap_set(bitmap, start_page + i);
 	}
 }
+#endif
+#ifdef COMP_ENABLE
+void IS_bitmap_group_clear(int *bitmap, unsigned long offset, unsigned long len) {
+	int start_sec = (int) (offset / IS_SECT_SIZE);
+	int len_sec = (int) (len / IS_SECT_SIZE);
+	int i;
+	for (i = 0; i < len_sec; i++) {
+		IS_bitmap_clear(bitmap, start_sec + i);
+	}
+}
+#else
 void IS_bitmap_group_clear(int *bitmap, unsigned long offset, unsigned long len)
 {
 	int start_page = (int)(offset/IS_PAGE_SIZE);	
@@ -895,6 +1075,7 @@ void IS_bitmap_group_clear(int *bitmap, unsigned long offset, unsigned long len)
 		IS_bitmap_clear(bitmap, start_page + i);
 	}
 }
+#endif
 bool IS_bitmap_test(int *bitmap, int i)
 {
 	if ((bitmap[i >> BITMAP_SHIFT] & (1 << (i & BITMAP_MASK))) != 0){
@@ -909,7 +1090,120 @@ void IS_bitmap_clear(int *bitmap, int i)
 {
 	bitmap[i >> BITMAP_SHIFT] &= ~(1 << (i & BITMAP_MASK));
 }
+#ifdef COMP_ENABLE
+void IS_bitmap_init(int *bitmap) {
+	memset(bitmap, 0x00, ONE_GB / (512 * 8));
+}
+#else
 void IS_bitmap_init(int *bitmap)
 {
 	memset(bitmap, 0x00, ONE_GB/(4096*8));
+}
+#endif
+
+static void IS_comp_bio_wait_endio(struct bio *bio, int error)
+{
+	struct IS_comp_bio_private *bio_ret = bio->bi_private;
+
+	bio_ret->error = error;
+	complete(&bio_ret->event);
+}
+
+static int IS_io_sectors(unsigned long sector, int len, void *buffer, struct IS_queue *is_q, int rw,
+                         unsigned long rqst_page_index) {
+	struct bio *bio;
+	struct request *req;
+	struct page *buffer_page;
+	struct IS_comp_bio_private bio_ret;
+	int ret;
+
+	buffer_page = virt_to_page(buffer);
+	BUG_ON(buffer != page_address(buffer_page));  /* buffer have to be page-aligned */
+
+	bio = bio_alloc(GFP_NOIO, 1);
+	if (!bio) {
+		pr_err("%s, fail to allocate bio, "
+		       "sector: %ld, len: %d\n",
+		       __func__, sector, len);
+		ret = -ENOMEM;
+		goto out;
+	}
+	bio->bi_sector = sector;
+	bio->bi_io_vec[0].bv_page = buffer_page;
+	bio->bi_io_vec[0].bv_len = len;
+	bio->bi_io_vec[0].bv_offset = 0;
+	bio->bi_vcnt = 1;
+	bio->bi_rw = rw;
+	bio->bi_size = len;
+	bio->bi_phys_segments = 1;
+
+	req = kzalloc(sizeof(struct request), GFP_NOIO);
+	if (!req) {
+		pr_err("%s, fail to allocate request, "
+		       "sector: %ld, len: %d\n",
+		       __func__, sector, len);
+		ret = -ENOMEM;
+		goto free_bio;
+	}
+	req->cmd_type = REQ_TYPE_FS;
+	req->cmd_flags |= bio->bi_rw & REQ_COMMON_MASK;
+	req->errors = 0;
+	req->__sector = bio->bi_sector;
+	req->ioprio = bio_prio(bio);
+	req->cmd_flags |= bio->bi_rw & REQ_WRITE;
+	req->nr_phys_segments = 1;
+	req->buffer = bio_data(bio);
+	req->__data_len = bio->bi_size;
+	req->bio = req->biotail = bio;
+	req->rq_disk = is_q->xdev->disk;
+
+	init_completion(&bio_ret.event);
+	bio_ret.rqst_page_index = rqst_page_index;
+	bio->bi_private = &bio_ret;
+	bio->bi_end_io = &IS_comp_bio_wait_endio;
+
+	IS_request(req, is_q);
+
+	wait_for_completion(&bio_ret.event);
+
+	ret = bio_ret.error;
+	if (ret < 0) {
+		pr_err("%s, I/O request fail, "
+		       "sector: %ld, len: %d, err: %d\n",
+		       __func__, sector, len, ret);
+		goto free_req;
+	}
+
+	kfree(req);
+	bio_put(bio);
+	return 0;
+
+free_req:
+	kfree(req);
+free_bio:
+	bio_put(bio);
+out:
+	return ret;
+}
+
+int IS_read_sectors(unsigned long sector, int len, void *buffer,
+                    struct IS_queue *is_q, unsigned long rqst_page_index) {
+	return IS_io_sectors(sector, len, buffer, is_q, READ, rqst_page_index);
+}
+
+int IS_write_sectors(unsigned long sector, int len, void *buffer,
+                     struct IS_queue *is_q, unsigned long rqst_page_index) {
+	return IS_io_sectors(sector, len, buffer, is_q, WRITE, rqst_page_index);
+}
+
+int IS_read(unsigned long ipage_index, void *buffer, struct IS_queue *is_q,
+            unsigned long rqst_page_index) {
+	return IS_read_sectors(ipage_index << (PAGE_SHIFT - IS_SECT_SHIFT),
+	                       IS_PAGE_SIZE, buffer, is_q, rqst_page_index);
+}
+
+int IS_write(unsigned long ipage_index, void *buffer, struct IS_queue *is_q,
+             unsigned long rqst_page_index) {
+	return IS_write_sectors(ipage_index << (PAGE_SHIFT - IS_SECT_SHIFT),
+	                        IS_PAGE_SIZE, buffer, is_q, rqst_page_index);
 }

@@ -213,6 +213,18 @@ struct raio_io_u {
 	#define BIO_PAGE_CAP	32
 #endif
 
+// macros used for compression
+#define IS_SECT_PER_PAGE_SHIFT  (PAGE_SHIFT - IS_SECT_SHIFT)
+#define IS_SECT_NUM_PER_PAGE     (1 << IS_SECT_PER_PAGE_SHIFT)
+#define IS_SECT_NUM     (STACKBD_SIZE_G << (30 - IS_SECT_SHIFT))
+#define IS_COMP_CHUNK_SHIFT     IS_SECT_SHIFT
+#define IS_COMP_CHUNK_SIZE      (1 << IS_COMP_CHUNK_SHIFT)
+#define IS_COMP_CHUNK_NUM_PER_PAGE      (PAGE_SIZE >> IS_COMP_CHUNK_SHIFT)
+#define IS_PAGE_NUM    (STACKBD_SIZE_G << (30 - PAGE_SHIFT))
+#define IS_COMP_0_UB    (PAGE_SIZE >> 2)
+#define IS_COMP_1_UB    (IS_COMP_0_UB * 2)
+#define IS_COMP_2_UB    (IS_COMP_0_UB * 3)
+#define IS_COMP_3_UB    PAGE_SIZE
 
 #define STACKBD_REDIRECT_OFF 0
 #define STACKBD_REDIRECT_ON  1
@@ -252,7 +264,12 @@ static DECLARE_WAIT_QUEUE_HEAD(req_event);
 #define BITMAP_MASK 0x1f // 2^5=32
 #define ONE_GB_MASK 0x3fffffff
 #define ONE_GB 1073741824 //1024*1024*1024 
-#define BITMAP_INT_SIZE 8192 //bitmap[], 1GB/4k/32
+#ifdef COMP_ENABLE
+	// compression needs sector-based bitmap
+	#define BITMAP_INT_SIZE 65536 //bitmap[], 1GB/512/32
+#else
+	#define BITMAP_INT_SIZE 8192 //bitmap[], 1GB/4k/32
+#endif
 
 enum mem_type {
 	DMA = 1,
@@ -606,7 +623,16 @@ struct IS_file {
 	struct IS_connection	    **IS_conns;
 	struct config_group	     dev_cg;
 	spinlock_t		     state_lock;
-	enum IS_dev_state	     state;	
+	enum IS_dev_state	     state;
+#ifdef COMP_ENABLE
+	void                    *driver; /* driver for compression */
+#endif
+};
+
+struct IS_comp_bio_private {
+	unsigned long rqst_page_index;
+	struct completion event;
+	int error;
 };
 
 #define uint64_from_ptr(p)    (uint64_t)(uintptr_t)(p)
@@ -664,6 +690,16 @@ struct IS_session *IS_session_find_by_portal(struct list_head *s_data_list,
 						 const char *portal);
 const char* IS_device_state_str(struct IS_file *dev);
 int IS_set_device_state(struct IS_file *dev, enum IS_dev_state state);
+
+//expose infiniswap interface for compression layer
+int IS_read_sectors(unsigned long sector, int len, void *buffer,
+                    struct IS_queue *is_q, unsigned long rqst_page_index);
+int IS_write_sectors(unsigned long sector, int len, void *buffer,
+                     struct IS_queue *is_q, unsigned long rqst_page_index);
+int IS_read(unsigned long ipage_index, void *buffer,
+            struct IS_queue *is_q, unsigned long rqst_page_index);
+int IS_write(unsigned long ipage_index, void *buffer,
+             struct IS_queue *is_q, unsigned long rqst_page_index);
 
 #endif  /* INFINISWAP_H */
 

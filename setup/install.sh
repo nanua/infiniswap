@@ -38,6 +38,14 @@ backup_disk="/dev/sda4"
 #(SERVER_SELECT_NUM), default is 1
 num_server_select=1
 
+#enable compression on swapped-out pages
+#(COMP_ENABLE), default is not enabled
+comp_enable=1
+
+#compression algorithm (available algorithms: LZO, LZ4)
+#(COMP_ALGO), default is LZO
+comp_algo="LZ4"
+
 
 
 # daemon options
@@ -79,6 +87,11 @@ bd_options="--enable-max_page_num=${max_page_num} \
 if [ ${have_lookup_bdev_patch} -gt 0 ];then
     bd_options="${bd_options} \
     --enable-lookup_bdev"
+fi
+if [ ${comp_enable} -gt 0 ];then
+    bd_options="${bd_options} \
+    --enable-comp_enable \
+    --enable-comp_algo=${comp_algo}"
 fi
 
 daemon_options="--enable-max_client=${max_client} \

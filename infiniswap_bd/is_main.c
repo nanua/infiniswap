@@ -40,6 +40,9 @@
  */
 
 #include "infiniswap.h"
+#ifdef COMP_ENABLE
+#include "comp_driver.h"
+#endif
 
 #define DRV_NAME	"IS"
 #define PFX		DRV_NAME ": "
@@ -187,10 +190,25 @@ void stackbd_bio_generate(struct rdma_ctx *ctx, struct request *req)
 	struct page *pg = NULL;
 	unsigned int nr_segs = req->nr_phys_segments;
 	unsigned int io_size = nr_segs * IS_PAGE_SIZE;
+#ifdef COMP_ENABLE
+	struct IS_comp_bio_private *private = req->bio->bi_private;
+	unsigned long rqst_page_index = private->rqst_page_index;
+#endif
 
 	cloned_bio = bio_clone(req->bio, GFP_ATOMIC); 
 	pg = virt_to_page(ctx->rdma_buf);
-	cloned_bio->bi_io_vec->bv_page  = pg; 
+	cloned_bio->bi_io_vec->bv_page  = pg;
+#ifdef COMP_ENABLE
+	cloned_bio->bi_sector = rqst_page_index << (PAGE_SHIFT - IS_SECT_SHIFT);
+	cloned_bio->bi_io_vec->bv_page  = pg;
+	cloned_bio->bi_io_vec->bv_len = IS_PAGE_SIZE;
+	cloned_bio->bi_io_vec->bv_offset = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+	cloned_bio->bi_iter.bi_size = IS_PAGE_SIZE;
+#else
+	cloned_bio->bi_size = IS_PAGE_SIZE;
+#endif
+#else  // COMP_ENABLE
 	cloned_bio->bi_io_vec->bv_len = io_size;
 	cloned_bio->bi_io_vec->bv_offset = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
@@ -198,24 +216,26 @@ void stackbd_bio_generate(struct rdma_ctx *ctx, struct request *req)
 #else
 	cloned_bio->bi_size = io_size;
 #endif
+#endif  // COMP_ENABLE
 	cloned_bio->bi_private = uint64_from_ptr(ctx);
 	stackbd_make_request5(cloned_bio);
 }
 
 void mem_gather(char *rdma_buf, struct request *req)
 {
-	char *buffer = NULL;
-	unsigned int i = 0;
-	unsigned int j = 0;
-	struct bio *tmp = req->bio;
-	unsigned int nr_seg = req->nr_phys_segments;
+	struct req_iterator req_iter;
+	struct bio_vec *bvec;
+	struct page *page;
+	void *page_addr;
+	int buffer_offset = 0;
 
-	for (i=0; i < nr_seg;){
-		buffer = bio_data(tmp);
-		j = tmp->bi_phys_segments;
-		memcpy(rdma_buf + (i * IS_PAGE_SIZE), buffer, IS_PAGE_SIZE * j);
-		i += j;
-		tmp = tmp->bi_next;
+	rq_for_each_segment (bvec, req, req_iter) {
+		page = bvec->bv_page;
+		page_addr = kmap_atomic(page);
+		memcpy(rdma_buf + buffer_offset,
+		       page_addr + bvec->bv_offset, bvec->bv_len);
+		kunmap_atomic(page_addr);
+		buffer_offset += bvec->bv_len;
 	}
 }
 
@@ -497,7 +517,11 @@ static int IS_disconnect_handler(struct kernel_cb *cb)
 				#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
 					blk_mq_end_request(ctx->req, 0);
 				#else
+				#ifdef COMP_ENABLE
+					ctx->req->bio->bi_end_io(ctx->req->bio, 0);
+				#else
 					blk_mq_end_io(ctx->req, 0);
+				#endif
 				#endif
 					break;
 				default:
@@ -821,9 +845,9 @@ static int client_read_done(struct kernel_cb * cb, struct ib_wc *wc)
 	req = ctx->req;
 	ctx->req = NULL;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
-	memcpy(bio_data(req->bio), ctx->rdma_buf, IS_PAGE_SIZE);
+	memcpy(bio_data(req->bio), ctx->rdma_buf, blk_rq_bytes(req));
 #else
-	memcpy(req->buffer, ctx->rdma_buf, IS_PAGE_SIZE);
+	memcpy(req->buffer, ctx->rdma_buf, blk_rq_bytes(req));
 #endif
 
 	IS_insert_ctx(ctx); 
@@ -831,7 +855,11 @@ static int client_read_done(struct kernel_cb * cb, struct ib_wc *wc)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
 	blk_mq_end_request(req, 0);
 #else
+#ifdef COMP_ENABLE
+	req->bio->bi_end_io(req->bio, 0);
+#else
 	blk_mq_end_io(req, 0);
+#endif
 #endif		
 	return 0;
 }
@@ -859,7 +887,11 @@ static int client_write_done(struct kernel_cb * cb, struct ib_wc *wc)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
 	blk_mq_end_request(req, 0);
 #else
+#ifdef COMP_ENABLE
+	req->bio->bi_end_io(req->bio, 0);
+#else
 	blk_mq_end_io(req, 0);
+#endif
 #endif		
 	return 0;
 }

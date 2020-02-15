@@ -33,7 +33,9 @@ obj-m := infiniswap.o
 infiniswap-objs := 	\
 	is_configfs.o	\
 	is_mq.o	\
-	is_main.o
+	is_main.o \
+	comp_pool.o \
+	comp_driver.o
 
 all-spec:
 	$(MAKE) -C $(build_dir)/build SUBDIRS=`pwd` KBUILD_EXTRA_SYMBOLS="$(KSYMVERS)" @KERNELMAKE_PARAMS@ modules

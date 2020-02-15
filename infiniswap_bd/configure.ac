@@ -85,6 +85,27 @@ AC_ARG_ENABLE([num_server_select],
 
 AC_DEFINE_UNQUOTED([USER_NUM_SERVER_SELECT], [${user_num_server_select}], [the number of queried server in looking for remote memory (SERVER_SELECT_NUM), default is 1])
 
+
+AC_ARG_ENABLE([comp_enable],
+[AS_HELP_STRING([--enable-comp_enable],
+[User defines whether to compress swapped-out pages to save disaggregated memory; Disabled by default])],
+[comp_enable=yes], [comp_enable=no])
+
+if [test $comp_enable = yes]; then
+  AC_DEFINE([COMP_ENABLE], [], [Enable compression on swapped-out pages])
+fi
+
+
+AC_ARG_ENABLE([comp_algo],
+[AS_HELP_STRING([--enable-comp_algo],
+[User defines the compression algorithm to use, default is LZO])],
+[comp_algo="${enableval}"], [comp_algo="LZO"])
+
+if [test $comp_algo = "LZ4"]; then
+  AC_DEFINE([COMP_LZ4], [], [Define LZ4 to be the compression algorithm])
+fi
+
+
 AC_CONFIG_HEADERS([config.h])
 
 #build against installed OFED
