@@ -48,11 +48,11 @@
 struct IS_comp_hq_private {
 	unsigned int index;  // index of the hardware queue
 	unsigned int queue_depth;
-	struct IS_comp_driver *driver;  // pointer to the compression driver
-	void *buffer;  // buffer for transfer data
+	struct IS_comp_driver *driver;  // pointer to the compression layer driver
+	void *buffer;  // buffer for transferring data
 
 	void *cmem;  // buffer for storing compressed data
-	void *compress_workmem;  // compression working memory
+	void *compress_workmem;  // compression working memory for LZO, LZ4, ...
 	struct mutex lock;  // lock for protecting cmem, compress_workmem, and buffer
 	struct IS_queue *is_q;
 };

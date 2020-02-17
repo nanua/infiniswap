@@ -41,7 +41,7 @@ struct zbud_header {
 	struct mutex lock;
 	unsigned int first_chunks;
 	unsigned int last_chunks;
-	struct ipage *ipage;
+	struct ipage *ipage;  // address in the underlying Infiniswap layer
 };
 
 struct zbud_info_entry {
@@ -51,8 +51,8 @@ struct zbud_info_entry {
 			struct zbud_header *zhdr;
 			enum buddy buddy;
 			size_t clen;
-		};  // compressed page
-		struct ipage *ipage;  // direct page
+		};  // for compressed page
+		struct ipage *ipage;  // for direct page (compression inflated page)
 	};
 	struct mutex lock;
 };
@@ -60,7 +60,7 @@ struct zbud_info_entry {
 #define ENTRY_VALID     0
 #define ENTRY_COMPRESSED    1
 
-// ipage represents page within infiniswap
+// ipage represents page in the underlying Infiniswap layer
 struct ipage {
 	struct list_head list;  // used for ipage free list
 	unsigned long ipage_index;
@@ -68,10 +68,10 @@ struct ipage {
 
 struct zbud_stat {
 	/* historical stats */
-	atomic_t num_comp_0_pages;  // [0, 0.25 * PAGE_SIZE)
-	atomic_t num_comp_1_pages;  // [0.25 * PAGE_SIZE, 0.5 * PAGE_SIZE)
-	atomic_t num_comp_2_pages;  // [0.5 * PAGE_SIZE, 0.75 * PAGE_SIZE)
-	atomic_t num_comp_3_pages;  // [0.75 * PAGE_SIZE, PAGE_SIZE]
+	atomic_t num_comp_0_pages;  // compressed size within [0, 0.25 * PAGE_SIZE)
+	atomic_t num_comp_1_pages;  // compressed size within [0.25 * PAGE_SIZE, 0.5 * PAGE_SIZE)
+	atomic_t num_comp_2_pages;  // compressed size within [0.5 * PAGE_SIZE, 0.75 * PAGE_SIZE)
+	atomic_t num_comp_3_pages;  // compressed size within [0.75 * PAGE_SIZE, PAGE_SIZE]
 	atomic_t num_is_read_fail;
 	atomic_t num_is_write_fail;
 	atomic_t num_malloc_fail;
@@ -106,9 +106,9 @@ struct zbud_pool {
 struct zbud_pool *zbud_create_pool(void);
 void zbud_destroy_pool(struct zbud_pool *pool);
 int zbud_write(struct zbud_pool *pool, void *umem, void *cmem, void *compress_workmem,
-		unsigned long rqst_page_index, struct IS_queue *is_q);
+               unsigned long rqst_page_index, struct IS_queue *is_q);
 int zbud_read(struct zbud_pool *pool, void *buffer, void *cmem, unsigned long rqst_page_index,
-		struct IS_queue *is_q);
+              struct IS_queue *is_q);
 void zbud_reset_stat(struct zbud_pool *pool);
 int zbud_force_clear_all(struct zbud_pool *pool);
 

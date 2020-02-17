@@ -52,6 +52,9 @@ static void atomic_put_ipage(struct zbud_pool *pool, struct ipage *ipage)
 	mutex_unlock(&pool->ipage_lock);
 }
 
+/*
+ * Delete the zbud header from the unbud list
+ */
 static void atomic_del_zhdr(struct zbud_pool *pool, struct zbud_header *zhdr)
 {
 	mutex_lock(&pool->unbud_lock);
@@ -59,6 +62,9 @@ static void atomic_del_zhdr(struct zbud_pool *pool, struct zbud_header *zhdr)
 	mutex_unlock(&pool->unbud_lock);
 }
 
+/*
+ * Put the zbud header into the unbud list
+ */
 static void atomic_put_zhdr(struct zbud_pool *pool, struct zbud_header *zhdr)
 {
 	int free_chunks;
@@ -70,6 +76,9 @@ static void atomic_put_zhdr(struct zbud_pool *pool, struct zbud_header *zhdr)
 	mutex_unlock(&pool->unbud_lock);
 }
 
+/*
+ * Get a suitable (i.e., with large enough free space) unbud page from the unbud list
+ */
 static struct zbud_header *atomic_get_zhdr(struct zbud_pool *pool, int free_chunks_lb)
 {
 	struct zbud_header *zhdr = NULL;
@@ -87,12 +96,20 @@ static struct zbud_header *atomic_get_zhdr(struct zbud_pool *pool, int free_chun
 				if (mutex_trylock(&zhdr->lock)) {
 					break;
 				} else {
+					/*
+					 * retry if a suitable unbud page is found
+					 * but is currently protected by its lock
+					 */
 					zhdr = NULL;
 					retry = 1;
 				}
 			}
 		}
 		if (!zhdr) {
+			/*
+			 * need to release unbud_lock when fail to get an unbud page
+			 * to eliminate dead-lock
+			 */
 			mutex_unlock(&pool->unbud_lock);
 		}
 	} while (!zhdr && retry);
@@ -105,6 +122,9 @@ static struct zbud_header *atomic_get_zhdr(struct zbud_pool *pool, int free_chun
 	return zhdr;
 }
 
+/*
+ * Write a direct page (page that cannot be compressed) to Infiniswap
+ */
 static int zbud_direct_write(struct zbud_pool *pool, void *umem, unsigned long rqst_page_index,
                              struct IS_queue *is_q)
 {
@@ -146,6 +166,9 @@ out:
 	return ret;
 }
 
+/*
+ * Write a compressed page to Infiniswap to form a full buddy with an unbud page
+ */
 static int zbud_buddy_write(struct zbud_pool *pool, void *cmem, size_t clen,
                             unsigned long rqst_page_index, struct zbud_header *zhdr, int chunks,
                             enum buddy bud, struct IS_queue *is_q)
@@ -189,6 +212,9 @@ out:
 	return ret;
 }
 
+/*
+ * Write a compressed unbud page to Infiniswap
+ */
 static int zbud_unbud_write(struct zbud_pool *pool, void *cmem, size_t clen, int chunks,
                             unsigned long rqst_page_index, struct IS_queue *is_q)
 {
@@ -255,6 +281,9 @@ out:
 	return ret;
 }
 
+/*
+ * Clear a direct page from Infiniswap
+ */
 static int zbud_direct_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
 {
 	struct zbud_info_entry *entry;
@@ -271,6 +300,9 @@ static int zbud_direct_clear(struct zbud_pool *pool, unsigned long rqst_page_ind
 	return 0;
 }
 
+/*
+ * Clear a compressed unbud page from Infiniswap
+ */
 static int zbud_unbud_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
 {
 	struct zbud_info_entry *entry;
@@ -292,8 +324,10 @@ static int zbud_unbud_clear(struct zbud_pool *pool, unsigned long rqst_page_inde
 	return 0;
 }
 
-static int zbud_buddy_clear(struct zbud_pool *pool,
-                            unsigned long rqst_page_index, struct IS_queue *is_q)
+/*
+ * Clear a compressed buddied page from Infiniswap
+ */
+static int zbud_buddy_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
 {
 	struct zbud_info_entry *entry;
 	struct zbud_header *zhdr;
@@ -316,32 +350,7 @@ static int zbud_buddy_clear(struct zbud_pool *pool,
 	return 0;
 }
 
-static int zbud_force_buddy_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
-{
-	struct zbud_info_entry *entry;
-	struct zbud_header *zhdr;
-	enum buddy bud;
-
-	entry = &pool->zbud_info_table[rqst_page_index];
-	zhdr = entry->zhdr;
-	bud = entry->buddy;
-
-	if (zhdr->ipage) {
-		atomic_put_ipage(pool, zhdr->ipage);
-		zhdr->ipage = NULL;
-	} else {
-		kfree(zhdr);
-	}
-
-	__clear_bit(ENTRY_VALID, &entry->flags);
-
-	atomic_dec(&pool->stat.num_buddy);
-	atomic_inc(&pool->stat.num_unbuddied_pages);
-	return 0;
-}
-
-static int zbud_clear(struct zbud_pool *pool, unsigned long rqst_page_index,
-                      struct IS_queue *is_q)
+static int zbud_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
 {
 	struct zbud_info_entry *entry;
 	struct zbud_header *zhdr;
@@ -370,7 +379,7 @@ static int zbud_clear(struct zbud_pool *pool, unsigned long rqst_page_index,
 			return ret;
 		}
 	} else {
-		ret = zbud_buddy_clear(pool, rqst_page_index, is_q);
+		ret = zbud_buddy_clear(pool, rqst_page_index);
 		if (ret < 0) {
 			pr_err("%s, fail in zbud_buddy_clear, rqst_page_index: %ld\n",
               		       __func__, rqst_page_index);
@@ -380,45 +389,9 @@ static int zbud_clear(struct zbud_pool *pool, unsigned long rqst_page_index,
 	return 0;
 }
 
-static int zbud_force_clear(struct zbud_pool *pool, unsigned long rqst_page_index)
-{
-	struct zbud_info_entry *entry;
-	struct zbud_header *zhdr;
-	int ret;
-
-	entry = &pool->zbud_info_table[rqst_page_index];
-
-	if (!test_bit(ENTRY_VALID, &entry->flags))
-		return 0;
-	if (!test_bit(ENTRY_COMPRESSED, &entry->flags)) {
-		ret = zbud_direct_clear(pool, rqst_page_index);
-		if (ret < 0) {
-			pr_err("%s, fail in zbud_direct_clear, rqst_page_index: %ld\n",
-       			       __func__, rqst_page_index);
-			return ret;
-		}
-		return 0;
-	}
-
-	zhdr = entry->zhdr;
-	if (zhdr->first_chunks == 0 || zhdr->last_chunks == 0) {
-		ret = zbud_unbud_clear(pool, rqst_page_index);
-		if (ret < 0) {
-			pr_err("%s, fail in zbud_unbud_clear, rqst_page_index: %ld\n",
-       			       __func__, rqst_page_index);
-			return ret;
-		}
-	} else {
-		ret = zbud_force_buddy_clear(pool, rqst_page_index);
-		if (ret < 0) {
-			pr_err("%s, fail in zbud_force_buddy_clear, rqst_page_index: %ld\n",
-       			       __func__, rqst_page_index);
-			return ret;
-		}
-	}
-	return 0;
-}
-
+/*
+ * Read a direct page (page that cannot be compressed) from Infiniswap
+ */
 static int zbud_direct_read(struct zbud_pool *pool, unsigned long rqst_page_index,
                             void *buffer, struct IS_queue *is_q)
 {
@@ -443,43 +416,10 @@ out:
 	return ret;
 }
 
-static int zbud_unbud_read(struct zbud_pool *pool, unsigned long rqst_page_index,
-                           void *buffer, struct IS_queue *is_q)
-{
-	struct zbud_info_entry *entry;
-	struct zbud_header *zhdr;
-	enum buddy bud;
-	size_t clen;
-	struct ipage *ipage;
-	unsigned long ipage_index;
-	int ret;
-
-	entry = &pool->zbud_info_table[rqst_page_index];
-	zhdr = entry->zhdr;
-	bud = entry->buddy;
-	clen = entry->clen;
-	ipage = zhdr->ipage;
-	ipage_index = ipage->ipage_index;
-
-	ret = IS_read_sectors((ipage_index << (PAGE_SHIFT - IS_COMP_CHUNK_SHIFT))
-	                       + ((bud == FIRST) ? 0 : ((PAGE_SIZE >> IS_COMP_CHUNK_SHIFT)
-			                                - zhdr->last_chunks)),
-	                      ((bud == FIRST) ? zhdr->first_chunks : zhdr->last_chunks)
-	                      << IS_COMP_CHUNK_SHIFT,
-	                      buffer, is_q, rqst_page_index);
-	if (ret < 0) {
-		pr_err("%s, fail to read from infiniswap, rqst_page_index: %ld, ipage_index: %ld\n",
-		       __func__, rqst_page_index, ipage_index);
-		atomic_inc(&pool->stat.num_is_read_fail);
-		goto out;
-	}
-	return 0;
-
-out:
-	return ret;
-}
-
-static int zbud_buddy_read(struct zbud_pool *pool, unsigned long rqst_page_index,
+/*
+ * Read a compressed page from Infiniswap
+ */
+static int zbud_comp_read(struct zbud_pool *pool, unsigned long rqst_page_index,
                            void *buffer, struct IS_queue *is_q)
 {
 	struct zbud_info_entry *entry;
@@ -613,7 +553,7 @@ int zbud_write(struct zbud_pool *pool, void *umem, void *cmem,
 	}
 
 	/* cleanup existing entry */
-	ret = zbud_clear(pool, rqst_page_index, is_q);
+	ret = zbud_clear(pool, rqst_page_index);
 	if (ret < 0) {
 		pr_err("%s, fail to clear the existing entry, rqst_page_index: %ld, ret: %d\n",
        		       __func__, rqst_page_index, ret);
@@ -657,10 +597,10 @@ int zbud_write(struct zbud_pool *pool, void *umem, void *cmem,
 	else
 		atomic_inc(&pool->stat.num_comp_3_pages);
 
-	/* First, try to find an unbuddied zpage */
+	/* First, try to find an unbuddied page */
 	zhdr = atomic_get_zhdr(pool, chunks);
 	if (zhdr) {
-		/* successfully find an unbuddied zpage */
+		/* successfully find an unbuddied page */
 		if (zhdr->first_chunks == 0)
 			bud = FIRST;
 		else
@@ -677,7 +617,7 @@ int zbud_write(struct zbud_pool *pool, void *umem, void *cmem,
 		}
 	}
 
-	/* Couldn't find unbuddied zpage, create new one */
+	/* Couldn't find unbuddied page, create new one */
 	ret = zbud_unbud_write(pool, cmem, clen, chunks, rqst_page_index, is_q);
 	if (ret < 0) {
 		pr_err("%s, fail to unbud write, rqst_page_index: %ld, ret: %d\n",
@@ -736,20 +676,11 @@ int zbud_read(struct zbud_pool *pool, void *buffer, void *cmem,
 	/* request page is compressed */
 	zhdr = entry->zhdr;
 	clen = entry->clen;
-	if (zhdr->first_chunks == 0 || zhdr->last_chunks == 0) {
-		ret = zbud_unbud_read(pool, rqst_page_index, cmem, is_q);
-		if (ret < 0) {
-			pr_err("%s, fail to unbud read, rqst_page_index: %ld, ret: %d\n",
-			       __func__, rqst_page_index, ret);
-			goto unlock;
-		}
-	} else {
-		ret = zbud_buddy_read(pool, rqst_page_index, cmem, is_q);
-		if (ret < 0) {
-			pr_err("%s, fail to buddy read, rqst_page_index: %ld, ret: %d\n",
-			       __func__, rqst_page_index, ret);
-			goto unlock;
-		}
+	ret = zbud_comp_read(pool, rqst_page_index, cmem, is_q);
+	if (ret < 0) {
+		pr_err("%s, fail to buddy read, rqst_page_index: %ld, ret: %d\n",
+		       __func__, rqst_page_index, ret);
+		goto unlock;
 	}
 
 	/* decompress */
@@ -808,7 +739,7 @@ int zbud_force_clear_all(struct zbud_pool *pool)
 	int ret;
 
 	for (rqst_page_index = 0; rqst_page_index < IS_PAGE_NUM; ++rqst_page_index) {
-		ret = zbud_force_clear(pool, rqst_page_index);
+		ret = zbud_clear(pool, rqst_page_index);
 		if (ret < 0) {
 			pr_err("%s, fail to force clear, rqst_page_index: %ld, ret: %d\n",
 			       __func__, rqst_page_index, ret);

@@ -265,7 +265,11 @@ static DECLARE_WAIT_QUEUE_HEAD(req_event);
 #define ONE_GB_MASK 0x3fffffff
 #define ONE_GB 1073741824 //1024*1024*1024 
 #ifdef COMP_ENABLE
-	// compression needs sector-based bitmap
+	/*
+	 * Compression layer needs to performan opeations on Infiniswap
+	 * at the granularity of sector (instead of page). So the bitmaps
+	 * also have to be sector-based.
+	 */
 	#define BITMAP_INT_SIZE 65536 //bitmap[], 1GB/512/32
 #else
 	#define BITMAP_INT_SIZE 8192 //bitmap[], 1GB/4k/32
@@ -629,6 +633,7 @@ struct IS_file {
 #endif
 };
 
+// private data for bio constructed by the compression layer
 struct IS_comp_bio_private {
 	unsigned long rqst_page_index;
 	struct completion event;

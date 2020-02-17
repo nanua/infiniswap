@@ -199,6 +199,13 @@ void stackbd_bio_generate(struct rdma_ctx *ctx, struct request *req)
 	pg = virt_to_page(ctx->rdma_buf);
 	cloned_bio->bi_io_vec->bv_page  = pg;
 #ifdef COMP_ENABLE
+	/*
+	 * After compression, read/write operations to Infiniswap will usually not in
+	 * sequential order. This will cause severe performance degradation since
+	 * hard-disk is sensitive to the order of operation. Therefore, when read/write
+	 * to the back-up disk, we reset the bio to perform operation on the original
+	 * address given by the block device layer.
+	 */
 	cloned_bio->bi_sector = rqst_page_index << (PAGE_SHIFT - IS_SECT_SHIFT);
 	cloned_bio->bi_io_vec->bv_page  = pg;
 	cloned_bio->bi_io_vec->bv_len = IS_PAGE_SIZE;

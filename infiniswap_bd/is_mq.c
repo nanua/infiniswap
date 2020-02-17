@@ -255,6 +255,13 @@ void stackbd_make_request2(struct request_queue *q, struct request *req)
 	}
 	bio = bio_clone(b, GFP_ATOMIC);
 #ifdef COMP_ENABLE
+	/*
+	 * After compression, read/write operations to Infiniswap will usually not in
+	 * sequential order. This will cause severe performance degradation since
+	 * hard-disk is sensitive to the order of operation. Therefore, when read/write
+	 * to the back-up disk, we reset the bio to perform operation on the original
+	 * address given by the block device layer.
+	 */
 	bio_private = b->bi_private;
 	rqst_page_index = bio_private->rqst_page_index;
 	bio->bi_sector = rqst_page_index << (PAGE_SHIFT - IS_SECT_SHIFT);
@@ -482,10 +489,15 @@ static int IS_request(struct request *req, struct IS_queue *xq)
 
 	// pr_info("%s called and req=%p, start=0x%lx, len=%lu\n", __func__, req, start, len);
 	gb_index = start >> ONE_GB_SHIFT;
-	if ((start + len) % IS_PAGE_SIZE == 0)
-		end_index = (start + len - IS_PAGE_SIZE) >> ONE_GB_SHIFT;
-	else
-		end_index = (start + len - ((start + len) % IS_PAGE_SIZE)) >> ONE_GB_SHIFT;
+#ifdef COMP_ENABLE
+	/*
+	 * Compression layer needs to performan opeations on Infiniswap
+	 * at the granularity of sector (instead of page).
+	 */
+	end_index = (start + len - IS_SECT_SIZE) >> ONE_GB_SHIFT;
+#else
+	end_index = (start + len - IS_PAGE_SIZE) >> ONE_GB_SHIFT;
+#endif
 
 	//count
 	if (write) {
@@ -562,6 +574,10 @@ static int IS_request(struct request *req, struct IS_queue *xq)
 	}else{	//read is always single page
 		if (atomic_read(&IS_sess->rdma_on) == DEV_RDMA_ON){
 #ifdef COMP_ENABLE
+			/*
+			 * Compression layer needs to performan opeations on Infiniswap
+			 * at the granularity of sector (instead of page).
+			 */
 			bitmap_i = (int)(chunk_offset / IS_SECT_SIZE);
 #else
 			bitmap_i = (int)(chunk_offset / IS_PAGE_SIZE);
@@ -631,6 +647,10 @@ static int IS_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 		ret = -ENOMEM;
 		goto out;
 	}
+	/*
+	 * Need to allocate larger buffer for compressed data (cmem)
+	 * since compression might inflate with incompressible data
+	 */
 	private->cmem = kmalloc(PAGE_SIZE << 1, GFP_KERNEL);
 	if (!private->cmem) {
 		pr_err("%s, unable to allocate cmem\n", __func__);
@@ -1038,6 +1058,11 @@ void IS_bitmap_set(int *bitmap, int i)
 
 #ifdef COMP_ENABLE
 void IS_bitmap_group_set(int *bitmap, unsigned long offset, unsigned long len) {
+	/*
+	 * Compression layer needs to performan opeations on Infiniswap
+	 * at the granularity of sector (instead of page). So the bitmaps
+	 * also have to be sector-based.
+	 */
 	int start_sec = (int) (offset / IS_SECT_SIZE);
 	int len_sec = (int) (len / IS_SECT_SIZE);
 	int i;
@@ -1058,6 +1083,11 @@ void IS_bitmap_group_set(int *bitmap, unsigned long offset, unsigned long len)
 #endif
 #ifdef COMP_ENABLE
 void IS_bitmap_group_clear(int *bitmap, unsigned long offset, unsigned long len) {
+	/*
+	 * Compression layer needs to performan opeations on Infiniswap
+	 * at the granularity of sector (instead of page). So the bitmaps
+	 * also have to be sector-based.
+	 */
 	int start_sec = (int) (offset / IS_SECT_SIZE);
 	int len_sec = (int) (len / IS_SECT_SIZE);
 	int i;
@@ -1092,6 +1122,11 @@ void IS_bitmap_clear(int *bitmap, int i)
 }
 #ifdef COMP_ENABLE
 void IS_bitmap_init(int *bitmap) {
+	/*
+	 * Compression layer needs to performan opeations on Infiniswap
+	 * at the granularity of sector (instead of page). So the bitmaps
+	 * also have to be sector-based.
+	 */
 	memset(bitmap, 0x00, ONE_GB / (512 * 8));
 }
 #else
@@ -1109,6 +1144,9 @@ static void IS_comp_bio_wait_endio(struct bio *bio, int error)
 	complete(&bio_ret->event);
 }
 
+/*
+ * Perform read/write operation on Infiniswap
+ */
 static int IS_io_sectors(unsigned long sector, int len, void *buffer, struct IS_queue *is_q, int rw,
                          unsigned long rqst_page_index) {
 	struct bio *bio;
@@ -1120,6 +1158,7 @@ static int IS_io_sectors(unsigned long sector, int len, void *buffer, struct IS_
 	buffer_page = virt_to_page(buffer);
 	BUG_ON(buffer != page_address(buffer_page));  /* buffer have to be page-aligned */
 
+	// construct bio
 	bio = bio_alloc(GFP_NOIO, 1);
 	if (!bio) {
 		pr_err("%s, fail to allocate bio, "
@@ -1137,6 +1176,7 @@ static int IS_io_sectors(unsigned long sector, int len, void *buffer, struct IS_
 	bio->bi_size = len;
 	bio->bi_phys_segments = 1;
 
+	// construct request (refer to init_request_from_bio)
 	req = kzalloc(sizeof(struct request), GFP_NOIO);
 	if (!req) {
 		pr_err("%s, fail to allocate request, "

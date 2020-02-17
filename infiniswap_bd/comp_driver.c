@@ -18,6 +18,9 @@
 #include "infiniswap.h"
 #include "comp_driver.h"
 
+/*
+ * Check whether req is page aligned and within range
+ */
 static inline int valid_io_request(struct request *req)
 {
 	u64 start, end, bound;
@@ -39,13 +42,9 @@ static inline int valid_io_request(struct request *req)
 	return 1;
 }
 
-static void update_position(u32 *index, int *offset, struct bio_vec *bvec)
-{
-	if (*offset + bvec->bv_len >= PAGE_SIZE)
-		(*index)++;
-	*offset = (*offset + bvec->bv_len) % PAGE_SIZE;
-}
-
+/*
+ * Read one page from zbud pool
+ */
 static int IS_comp_read_page(struct IS_comp_driver *driver, unsigned int page_index,
                              void *buffer, void *cmem, struct IS_queue *is_q)
 {
@@ -60,6 +59,9 @@ static int IS_comp_read_page(struct IS_comp_driver *driver, unsigned int page_in
 	return 0;
 }
 
+/*
+ * Write one page to zbud pool
+ */
 static int IS_comp_write_page(struct IS_comp_driver *driver, unsigned int page_index,
                               void *buffer, void *cmem, void *compress_workmem,
                               struct IS_queue *is_q)
@@ -75,6 +77,9 @@ static int IS_comp_write_page(struct IS_comp_driver *driver, unsigned int page_i
 	return 0;
 }
 
+/*
+ * Perform read/write operation on one bio_vec
+ */
 static int IS_comp_bvec_rw(struct IS_comp_driver *driver, struct bio_vec *bvec,
                            void *buffer, int inpage_offset, int rw)
 {
@@ -108,6 +113,19 @@ out:
 	return ret;
 }
 
+/*
+ * Update page index and in-page offset after performing operation on a bio_vec
+ */
+static void update_position(u32 *index, int *offset, struct bio_vec *bvec)
+{
+	if (*offset + bvec->bv_len >= PAGE_SIZE)
+		(*index)++;
+	*offset = (*offset + bvec->bv_len) % PAGE_SIZE;
+}
+
+/*
+ * Handle block device request req
+ */
 static int IS_comp_request_fn(struct request *req, struct IS_comp_hq_private *private)
 {
 	struct IS_comp_driver *driver;
@@ -139,6 +157,11 @@ static int IS_comp_request_fn(struct request *req, struct IS_comp_hq_private *pr
 
 	page_iter = page_index;
 	inpage_offset = 0;
+
+	/*
+	 * Since bio_vec might come across page boundary,
+	 * we will need to split bio_vec into two parts in that case.
+	 */
 
 	rq_for_each_segment (raw_bvec, req, req_iter) {
 		if (rw == READ && inpage_offset == 0) {
@@ -221,6 +244,10 @@ static void IS_comp_io_fn(struct work_struct *work)
 	kfree(cur_work);
 
 	private = hctx->driver_data;
+	/*
+	 * Since cmem, compress_workmem, and buffer is shared within a hardware queue,
+	 * we apply mutex to ensure that only one kernel thread can use those resource.
+	 */
 	mutex_lock(&private->lock);
 	ret = IS_comp_request_fn(req, private);
 	if (ret < 0) {
@@ -256,6 +283,11 @@ int IS_queue_rq(struct blk_mq_hw_ctx *hctx, struct request *req)
 	page_num = blk_rq_bytes(req) >> PAGE_SHIFT;
 	private = hctx->driver_data;
 
+	/*
+	 * Only schedule to handle this request rather than process it right now.
+	 * We find that this choice results in better performance on both TPC-C
+	 * and Memcached workloads.
+	 */
 	cur_work = kmalloc(sizeof(struct IS_comp_work), GFP_NOIO);
 	if (!cur_work) {
 		pr_err("%s, unable to allocate work struct, "

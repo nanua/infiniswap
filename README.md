@@ -50,15 +50,21 @@ There are several important parameters to configure in Infiniswap:
     It limits the maximum value of MAX_SGL_LEN.  
   5. `MAX_MR_SIZE_GB` [size]  
     It sets the maximum number of slabs from a single Infiniswap daemon. Each slab is 1GB.
+  6. `COMP_ENABLE`  
+    It specifies whether to enable compression.
+  7. `COMP_LZ4`   
+    It specifies whether to use LZ4 compression algorithm instead of LZO (default).
   ```c
   // example, in "infiniswap.h" 
   #define BACKUP_DISK "/dev/sda4"  
   #define STACKBD_SZIE_G 12  // 12GB
-  #define MAX_SGL_LEN 32  // 32 x 4KB = 128KB, it's the max size for a single "struct bio" object.
+#define MAX_SGL_LEN 32  // 32 x 4KB = 128KB, it's the max size for a single "struct bio" object.
   #define BIO_PAGE_CAP 32
   #define MAX_MR_SIZE_GB 32 //this infiniswap block device can get 32 slabs from each infiniswap daemon.
+  #define COMP_ENABLE
+  #define COMP_LZ4
   ```
-
+  
 * Infiniswap daemon (in `infiniswap_daemon/rdma-common.h`)
   1. `MAX_FREE_MEM_GB` [size]   
      It is the maximum size (in GB) of remote memory this daemon can provide (from free memory of the local host).     
@@ -85,8 +91,8 @@ There are several important parameters to configure in Infiniswap:
 
 #### How to configure those parameters?
   * If you use the provided installation script (``setup/install.sh``)
-  You can configure those parameters by changing the value of the variables in ``setup/install.sh`` before installation. 
-  In ``setup/install.sh``, the definition of the variable and which parameter it maps to have been declared. You can edit its value as needed. For example,
+    You can configure those parameters by changing the value of the variables in ``setup/install.sh`` before installation. 
+    In ``setup/install.sh``, the definition of the variable and which parameter it maps to have been declared. You can edit its value as needed. For example,
     ```bash
     #stackbd (backup) disk size, also the total size of remote memory of this bd
     #(STACKBD_SIZE), default is 12
@@ -109,7 +115,7 @@ There are several important parameters to configure in Infiniswap:
     For example, if your Infiniswap block device has 24GB space in both its backup disk and remote memory, you need to
     ```bash
     ./configure --enable-stackbd_size=24
-    ``` 
+    ```
 
 How to Build and Install
 -----------
@@ -148,7 +154,7 @@ cd setup
   ./autogen.sh
   ./configure [options] 
   make
-  ``` 
+  ```
 
   * Infiniswap block device
   ```bash  	
@@ -157,7 +163,7 @@ cd setup
   ./configure [options] 
   make
   sudo make install
-  ``` 
+  ```
 
   If you want to change the parameters of Infiniswap, you can add options when executing ``configure``. 
   Please read [how to add configure options](#config) for details.
@@ -267,7 +273,7 @@ This should be handled by configure file, and refer the Makefile that links OFED
         * **Or,  if you build ``infiniswap_bd`` manually**, add ``--enable-lookup_bdev`` in the configuration step.
 
 
-    
+​    
 
 Contact
 -----------
