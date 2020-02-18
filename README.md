@@ -50,10 +50,10 @@ There are several important parameters to configure in Infiniswap:
     It limits the maximum value of MAX_SGL_LEN.  
   5. `MAX_MR_SIZE_GB` [size]  
     It sets the maximum number of slabs from a single Infiniswap daemon. Each slab is 1GB.
-  6. `COMP_ENABLE`	
+  6. `COMP_ENABLE`  
     It specifies whether to enable compression.	
     To be noticed that, compression is currently only available on Linux kernel 3.13.0.	
-  7. `COMP_LZ4`	
+  7. `COMP_LZ4`  
     It specifies whether to use LZ4 as the compression algorithm instead of LZO (default).
   ```c
   // example, in "infiniswap.h" 
