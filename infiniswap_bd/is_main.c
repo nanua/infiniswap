@@ -228,6 +228,7 @@ void stackbd_bio_generate(struct rdma_ctx *ctx, struct request *req)
 	stackbd_make_request5(cloned_bio);
 }
 
+#ifdef COMP_ENABLE
 void mem_gather(char *rdma_buf, struct request *req)
 {
 	struct req_iterator req_iter;
@@ -245,6 +246,24 @@ void mem_gather(char *rdma_buf, struct request *req)
 		buffer_offset += bvec->bv_len;
 	}
 }
+#else
+void mem_gather(char *rdma_buf, struct request *req)
+{
+	char *buffer = NULL;
+	unsigned int i = 0;
+	unsigned int j = 0;
+	struct bio *tmp = req->bio;
+	unsigned int nr_seg = req->nr_phys_segments;
+
+	for (i=0; i < nr_seg;) {
+		buffer = bio_data(tmp);
+		j = tmp->bi_phys_segments;
+		memcpy(rdma_buf + (i * IS_PAGE_SIZE), buffer, IS_PAGE_SIZE * j);
+		i += j;
+		tmp = tmp->bi_next;
+	}
+}
+#endif
 
 int IS_rdma_write(struct IS_connection *IS_conn, struct kernel_cb *cb, int cb_index, int chunk_index, struct remote_chunk_g *chunk, unsigned long offset, unsigned long len, struct request *req, struct IS_queue *q)
 {
